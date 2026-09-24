@@ -397,7 +397,8 @@ void ValidateProgram(const Program& program, bool require_ssa) {
 					                        ValueOpcodeName(inst.GetOpcode())));
 				}
 				const auto& memory = program.memory_info[memory_index];
-				if (memory.kind != ResourceKind::ScalarBuffer) {
+				if (memory.kind != ResourceKind::ScalarBuffer &&
+				    memory.kind != ResourceKind::IndirectBuffer) {
 					return Fail(fmt::format("{} has an invalid scalar-memory resource kind",
 					                        ValueOpcodeName(inst.GetOpcode())));
 				}
@@ -446,7 +447,7 @@ void ValidateProgram(const Program& program, bool require_ssa) {
 					return Fail(fmt::format("{} has an invalid memory-info index",
 					                        ValueOpcodeName(inst.GetOpcode())));
 				}
-				const auto& memory = program.memory_info[memory_index];
+				const auto& memory        = program.memory_info[memory_index];
 				const bool  vector_buffer = memory.kind == ResourceKind::Buffer ||
 				                            memory.kind == ResourceKind::IndirectBuffer;
 				if (!vector_buffer && memory.kind != ResourceKind::ScalarBuffer) {

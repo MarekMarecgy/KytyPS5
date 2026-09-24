@@ -558,6 +558,8 @@ enum class Opcode {
 	DS_READ_ADDTID_B32,
 	IMAGE_GET_RESINFO,
 	IMAGE_GET_LOD,
+	IMAGE_BVH_INTERSECT_RAY,
+	IMAGE_BVH64_INTERSECT_RAY,
 	IMAGE_LOAD,
 	IMAGE_LOAD_MIP,
 	IMAGE_STORE,
@@ -731,15 +733,17 @@ struct Instruction {
 struct Program {
 	std::span<const uint32_t> code;
 	std::vector<Instruction>  instructions;
-	bool                     has_bvh = false;
+	bool                      has_bvh = false;
 };
 
 // Code spans are trusted to contain complete instructions, valid branch targets, and 32-bit PCs.
 Family GetInstructionFamily(uint32_t word);
 // The output object must be freshly initialized.
-void DecodeInstruction(std::span<const uint32_t> code, uint32_t word_index, Instruction& inst);
+void    DecodeInstruction(std::span<const uint32_t> code, uint32_t word_index, Instruction& inst);
 Program DecodeFrontProgram(std::span<const uint32_t> front);
-void DecodeProgram(std::span<const uint32_t> code, Program& program);
+// With stop_at_bvh, decoding ends at the first BVH intersection instruction so that ray-tracing
+// shaders can be detected (and skipped) without decoding code the recompiler cannot handle.
+void DecodeProgram(std::span<const uint32_t> code, Program& program, bool stop_at_bvh = true);
 bool IsConditionalBranch(Opcode opcode);
 bool IsDirectBranch(Opcode opcode);
 

@@ -13527,6 +13527,7 @@ int main() {
 
   EnsureConfigInitialized();
   TestRayTracingDispatchDetection();
+  TestRayTracingEmulation();
   TestResourceDescriptorClassification();
   TestShaderBufferResourceSize();
   TestNativeShaderResourceDependencies();

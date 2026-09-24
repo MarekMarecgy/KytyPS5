@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
+#include <string>
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -21,7 +23,8 @@ SrtRuntime CleanRuntime(SrtRuntime runtime) {
 
 namespace {
 
-constexpr uint64_t AddressMask = 0x0000ffffffffffffull;
+constexpr uint64_t AddressMask  = 0x0000ffffffffffffull;
+constexpr uint64_t NullPageSize = 0x10000u;
 
 const char* StageName(ShaderType stage) {
 	switch (stage) {
@@ -331,9 +334,8 @@ public:
 						                        (op == ValueOpcode::ReadConstBuffer &&
 						                         kind == ResourceKind::ScalarAddress);
 						if (crosswired) {
-							Fail(flags.pc,
-							     fmt::format("{} has incompatible scalar memory metadata",
-							                 ValueOpcodeName(op)));
+							Fail(flags.pc, fmt::format("{} has incompatible scalar memory metadata",
+							                           ValueOpcodeName(op)));
 						}
 					}
 				}
@@ -402,7 +404,10 @@ private:
 			return;
 		}
 		const auto offset = inst->Arg(1).Resolve();
-		if (!offset.IsImmediate() || offset.GetType() != Type::U32) {
+		// A read whose address changes between loop iterations (e.g. BVH traversal loading
+		// instance nodes) has no single value to precompute; keep it as a runtime read.
+		if (!offset.IsImmediate() || offset.GetType() != Type::U32 ||
+		    AddressDependsOnVariantPhi(*inst)) {
 			if (std::ranges::find(m_program.dynamic_reads, value) ==
 			    m_program.dynamic_reads.end()) {
 				m_program.dynamic_reads.push_back(value);
@@ -418,6 +423,34 @@ private:
 		const auto slot = static_cast<uint32_t>(m_program.srt_reads.size());
 		m_program.srt_reads.push_back({value, slot});
 		m_patches.push_back({inst, slot, true});
+	}
+
+	bool AddressDependsOnVariantPhi(const Inst& read) const {
+		std::vector<Value>              pending;
+		std::unordered_set<const Inst*> visited;
+		const auto*                     handle = read.Arg(0).Resolve().TryInstruction();
+		if (handle != nullptr) {
+			for (size_t index = 0; index < handle->NumArgs(); index++) {
+				pending.push_back(handle->Arg(index));
+			}
+		}
+		pending.push_back(read.Arg(1));
+		while (!pending.empty()) {
+			const auto  current = pending.back().Resolve();
+			const auto* inst    = current.TryInstruction();
+			pending.pop_back();
+			if (inst == nullptr || !visited.insert(inst).second) {
+				continue;
+			}
+			if (inst->GetOpcode() == ValueOpcode::Phi &&
+			    ResolveInvariantPhi(m_program, current).IsEmpty()) {
+				return true;
+			}
+			for (size_t index = 0; index < inst->NumArgs(); index++) {
+				pending.push_back(inst->Arg(index));
+			}
+		}
+		return false;
 	}
 
 	void PatchReads() {
@@ -467,7 +500,9 @@ SrtWalker::SrtWalker(const ResourcePlan& program, const SrtRuntime& runtime,
       m_clean_evaluator(clean_evaluator), m_active_mask(active_mask.Resolve()),
       m_context(AcquireContext(program)) {}
 
-SrtWalker::~SrtWalker() { --m_program.evaluation_depth; }
+SrtWalker::~SrtWalker() {
+	--m_program.evaluation_depth;
+}
 
 bool SrtWalker::Evaluate(Value value, uint32_t& result) {
 	uint64_t wide = 0;
@@ -508,8 +543,8 @@ bool SrtWalker::EvaluateWide(Value value, uint64_t& result) {
 	if (inst == nullptr) {
 		return false;
 	}
-	if (!m_active_mask.IsEmpty() && IsRuntimeSelect(inst->GetOpcode()) &&
-	    inst->NumArgs() == 3 && inst->Arg(0).Resolve() == m_active_mask) {
+	if (!m_active_mask.IsEmpty() && IsRuntimeSelect(inst->GetOpcode()) && inst->NumArgs() == 3 &&
+	    inst->Arg(0).Resolve() == m_active_mask) {
 		return EvaluateWide(inst->Arg(1), result);
 	}
 	const auto index = inst->EvaluationIndex(m_program.evaluation_value_count);
@@ -525,8 +560,8 @@ bool SrtWalker::EvaluateWide(Value value, uint64_t& result) {
 		return false;
 	}
 	m_context.values[index].generation = m_context.generation | 1u;
-	uint64_t out = 0;
-	const bool evaluated = EvaluateInst(*inst, out);
+	uint64_t   out                     = 0;
+	const bool evaluated               = EvaluateInst(*inst, out);
 	// Recursive evaluation may grow the dense memo vector.
 	auto& memo = m_context.values[index];
 	if (!evaluated) {
@@ -535,7 +570,7 @@ bool SrtWalker::EvaluateWide(Value value, uint64_t& result) {
 	}
 	memo.value      = out;
 	memo.generation = m_context.generation;
-	result = out;
+	result          = out;
 	return true;
 }
 
@@ -580,8 +615,7 @@ bool SrtWalker::EvaluateExtract(const Inst& inst, uint64_t& result) {
 		}
 		const auto sum =
 		    static_cast<uint64_t>(static_cast<uint32_t>(lhs)) + static_cast<uint32_t>(rhs);
-		result =
-		    component == 0u ? static_cast<uint32_t>(sum) : static_cast<uint32_t>(sum >> 32u);
+		result = component == 0u ? static_cast<uint32_t>(sum) : static_cast<uint32_t>(sum >> 32u);
 		return true;
 	}
 	return false;
@@ -615,10 +649,9 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		if (immediate < 0) {
 			return false;
 		}
-		const auto byte_offset =
-		    static_cast<uint64_t>(immediate) + static_cast<uint32_t>(offset);
-		const auto aligned = byte_offset & ~uint64_t {3};
-		const auto stride  = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
+		const auto byte_offset = static_cast<uint64_t>(immediate) + static_cast<uint32_t>(offset);
+		const auto aligned     = byte_offset & ~uint64_t {3};
+		const auto stride      = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
 		const auto size = stride == 0u
 		                      ? static_cast<uint64_t>(static_cast<uint32_t>(records))
 		                      : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
@@ -627,8 +660,8 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		}
 		address = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
 	} else {
-		const auto relative = (immediate & ~int64_t {3}) +
-		                      static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
+		const auto relative =
+		    (immediate & ~int64_t {3}) + static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
 		if (!AddSignedAddress(base & ~uint64_t {3}, relative, address)) {
 			return false;
 		}
@@ -639,6 +672,13 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 			return false;
 		}
 	} else {
+		// SRT planning collects reads regardless of control flow, so a read guarded by a
+		// branch that is not taken can fold to a null base. Dereferencing it would crash the
+		// host; treat the null page as zero-filled instead.
+		if (address < NullPageSize) {
+			result = 0;
+			return true;
+		}
 		std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
 	}
 	result = word;
@@ -650,9 +690,7 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 	uint64_t   b       = 0;
 	uint64_t   c       = 0;
 	const auto binary  = [&]() { return Arg(inst, 0, a) && Arg(inst, 1, b); };
-	const auto ternary = [&]() {
-		return Arg(inst, 0, a) && Arg(inst, 1, b) && Arg(inst, 2, c);
-	};
+	const auto ternary = [&]() { return Arg(inst, 0, a) && Arg(inst, 1, b) && Arg(inst, 2, c); };
 	switch (inst.GetOpcode()) {
 		case ValueOpcode::GetUserData: {
 			const auto reg = RegIndex(inst.Arg(0).ScalarRegister());
@@ -668,8 +706,7 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 		case ValueOpcode::ReadFirstLane: {
 			const auto clean_runtime = CleanRuntime(m_runtime);
 			SrtWalker  clean_active(m_program, clean_runtime, {}, nullptr, inst.Arg(1));
-			SrtWalker  active(m_program, m_runtime, m_clean_flat_slots, &clean_active,
-			                  inst.Arg(1));
+			SrtWalker  active(m_program, m_runtime, m_clean_flat_slots, &clean_active, inst.Arg(1));
 			return active.EvaluateWide(inst.Arg(0), result);
 		}
 		case ValueOpcode::BitCastU32F32:
@@ -680,8 +717,8 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 			if (!binary()) {
 				return false;
 			}
-			result = static_cast<uint32_t>(a) |
-			         (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32u);
+			result =
+			    static_cast<uint32_t>(a) | (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32u);
 			return true;
 		case ValueOpcode::ReadConst: {
 			const auto slot = inst.Arg(1).Resolve();
@@ -689,8 +726,8 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 			    slot.U32() >= m_program.srt_reads.size()) {
 				return false;
 			}
-			if (slot.U32() < m_clean_flat_slots.size() &&
-			    m_clean_flat_slots[slot.U32()] != 0u && m_clean_evaluator != nullptr) {
+			if (slot.U32() < m_clean_flat_slots.size() && m_clean_flat_slots[slot.U32()] != 0u &&
+			    m_clean_evaluator != nullptr) {
 				return m_clean_evaluator->EvaluateWide(m_program.srt_reads[slot.U32()].value,
 				                                       result);
 			}
@@ -847,8 +884,8 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 			return false;
 		case ValueOpcode::ShiftRightArithmetic32:
 			if (binary()) {
-				result = static_cast<uint32_t>(
-				    std::bit_cast<int32_t>(static_cast<uint32_t>(a)) >> (b & 31u));
+				result = static_cast<uint32_t>(std::bit_cast<int32_t>(static_cast<uint32_t>(a)) >>
+				                               (b & 31u));
 				return true;
 			}
 			return false;
@@ -868,7 +905,7 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 				const auto mask = width == 32u  ? UINT32_MAX
 				                  : width == 0u ? 0u
 				                                : (uint32_t {1} << width) - 1u;
-				result = width == 0u ? 0u : (static_cast<uint32_t>(a) >> offset) & mask;
+				result          = width == 0u ? 0u : (static_cast<uint32_t>(a) >> offset) & mask;
 				return true;
 			}
 			return false;
@@ -906,10 +943,9 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 				result = static_cast<uint32_t>(a);
 				return true;
 			}
-			const auto mask =
-			    width == 32u ? UINT32_MAX : ((uint32_t {1} << width) - 1u) << offset;
-			result = (static_cast<uint32_t>(a) & ~mask) |
-			         ((static_cast<uint32_t>(b) << offset) & mask);
+			const auto mask = width == 32u ? UINT32_MAX : ((uint32_t {1} << width) - 1u) << offset;
+			result =
+			    (static_cast<uint32_t>(a) & ~mask) | ((static_cast<uint32_t>(b) << offset) & mask);
 			return true;
 		}
 		case ValueOpcode::SelectU32:
@@ -990,8 +1026,8 @@ bool SrtWalker::EvaluateDescriptor(uint32_t source, DescriptorValue& result) {
 		return false;
 	}
 	const auto& descriptor = m_program.descriptor_sources[source];
-	result = {};
-	result.dword_count = descriptor.dword_count;
+	result                 = {};
+	result.dword_count     = descriptor.dword_count;
 	for (uint32_t index = 0; index < descriptor.dword_count; ++index) {
 		if (!Evaluate(descriptor.dwords[index], result.dwords[index])) {
 			return false;
@@ -1022,7 +1058,7 @@ std::span<const uint8_t> SrtWalker::FindActiveSources() {
 		if (visited.at(index)) {
 			continue;
 		}
-		visited[index] = 1u;
+		visited[index]    = 1u;
 		const auto& block = m_program.control_flow[index];
 		for (const auto source: block.sources) {
 			active[source] = 1u;
@@ -1044,14 +1080,29 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	}
 	flat.resize(m_program.srt_reads.size());
 	for (const auto& read: m_program.srt_reads) {
-		const bool clean = read.flat_offset < m_clean_flat_slots.size() &&
-		                   m_clean_flat_slots[read.flat_offset] != 0u;
-		if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr)) {
+		const bool clean    = read.flat_offset < m_clean_flat_slots.size() &&
+		                      m_clean_flat_slots[read.flat_offset] != 0u;
+		const auto describe = [&](const char* why) {
+			const auto*       inst = read.value.Resolve().TryInstruction();
+			const std::string name = inst != nullptr
+			                             ? std::string(ValueOpcodeName(inst->GetOpcode()))
+			                             : std::string("-");
+			std::printf(
+			    "SRT flat read failed (%s): hash=0x%016llx slot=%u clean=%d op=%s pc=0x%08x\n", why,
+			    static_cast<unsigned long long>(m_program.shader_hash), read.flat_offset,
+			    clean ? 1 : 0, name.c_str(),
+			    inst != nullptr && IsRawRead(m_program, *inst) ? inst->Flags<MemoryFlags>().pc
+			                                                   : 0u);
 			return false;
+		};
+		if (clean &&
+		    (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr)) {
+			return describe("clean slot without specialization memory");
 		}
 		auto& evaluator = clean ? *m_clean_evaluator : *this;
-		if (read.flat_offset >= flat.size() || !evaluator.Evaluate(read.value, flat[read.flat_offset])) {
-			return false;
+		if (read.flat_offset >= flat.size() ||
+		    !evaluator.Evaluate(read.value, flat[read.flat_offset])) {
+			return describe("evaluation");
 		}
 	}
 	return true;

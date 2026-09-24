@@ -85,3 +85,51 @@ void TestRayTracingDispatchDetection() {
     CheckSpirvBinaryValidates(compiled.spirv);
   }
 }
+
+void TestRayTracingEmulation() {
+  constexpr uint32_t R128 = 1u << 15u;
+  constexpr uint32_t Dim1D = 0u;
+  struct Variant {
+    const char *name;
+    uint32_t opcode;
+    bool a16;
+    std::vector<uint32_t> nsa;
+  };
+  const std::vector<Variant> variants = {
+      {"contiguous BVH", 0xe6u, false, {}},
+      // Node pointer in v0, the remaining ten address components in v50..v59.
+      {"NSA BVH", 0xe6u, false, {0x35343332u, 0x39383736u, 0x00003b3au}},
+      {"contiguous BVH64", 0xe7u, false, {}},
+      {"A16 BVH", 0xe6u, true, {}},
+  };
+  for (const auto &variant : variants) {
+    std::vector<uint32_t> shader = {
+        // T# in s8..s11: base 0x10000, box sorting, NUM_RECORDS, type 8 + barycentrics.
+        EncodeSMovB32(8, 255), 0x00000100u,
+        EncodeSMovB32(9, 255), 0x80000000u,
+        EncodeSMovB32(10, 255), 0xffffffffu,
+        EncodeSMovB32(11, 255), 0x81000000u,
+        EncodeMimg0(variant.opcode, 0xf, false, Dim1D) | R128 |
+            (static_cast<uint32_t>(variant.nsa.size()) << 1u),
+        EncodeMimg1(20, 2, 0, 0, variant.a16),
+    };
+    shader.insert(shader.end(), variant.nsa.begin(), variant.nsa.end());
+    // Store the first result dword so the intersection is not dead code.
+    shader.push_back(EncodeMubuf0(0x1c, 0, false));
+    shader.push_back(EncodeMubuf1(20, 12, 0));
+    shader.push_back(EncodeSopp(0x01));
+
+    auto options = MakeCompileOptions(ShaderType::Compute);
+    options.dump_ir = true;
+    options.emulate_ray_tracing = true;
+    const auto translated = ShaderRecompiler::TranslateProgram(shader, options);
+    Check(!translated.skip_dispatch, variant.name);
+    const auto result = RecompileForTest(shader, options);
+    Check(!result.spirv.empty(), variant.name);
+    Check(result.program.info.uses_dma,
+          "BVH emulation did not read nodes through guest addresses");
+    Check(result.ir_dump.find("LoadAddressU32") != std::string::npos,
+          "BVH emulation did not emit node loads");
+    CheckSpirvBinaryValidates(result.spirv);
+  }
+}
