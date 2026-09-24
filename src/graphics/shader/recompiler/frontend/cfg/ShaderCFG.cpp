@@ -1150,8 +1150,7 @@ bool IsEnclosingLinearExit(const Graph& graph, uint32_t header, uint32_t block_i
 	       block->successors.size() == 1u) {
 		block = graph.FindBlock(block->successors.front());
 	}
-	if (block == nullptr || graph.Dominates(header, block->id) ||
-	    block->predecessors.empty()) {
+	if (block == nullptr || graph.Dominates(header, block->id) || block->predecessors.empty()) {
 		return false;
 	}
 	return std::ranges::all_of(block->predecessors, [&](uint32_t predecessor) {
@@ -1252,14 +1251,16 @@ bool IsInnermostLoopControlConditional(const Graph& graph, const BasicBlock& blo
 		};
 		return is_repeat_target(true_target) && is_repeat_target(false_target);
 	}
-	const bool true_in_body  = Contains(loop->body_blocks, true_target);
-	const bool false_in_body = Contains(loop->body_blocks, false_target);
-	if (true_in_body != false_in_body) {
-		return true;
-	}
 	const auto is_control_target = [&](uint32_t target) {
 		return target == loop->merge || target == loop->continue_block;
 	};
+	const bool true_in_body  = Contains(loop->body_blocks, true_target);
+	const bool false_in_body = Contains(loop->body_blocks, false_target);
+	if (true_in_body != false_in_body) {
+		// Without a selection merge, SPIR-V only allows leaving the loop through its merge
+		// (break) or continue block. Any other exit needs a structured selection instead.
+		return is_control_target(true_in_body ? false_target : true_target);
+	}
 	return (is_control_target(true_target) &&
 	        (is_control_target(false_target) ||
 	         IsInsideLoopConstruct(graph, *loop, false_target))) ||
@@ -1274,6 +1275,85 @@ bool MergeLeavesContainingLoop(const Graph& graph, uint32_t header, uint32_t mer
 		}
 	}
 	return false;
+}
+
+// Goto variables for loop exits live above the IDs used by selection routing in Structurize.
+constexpr uint32_t LoopExitGotoVariableBase = 0x40000000u;
+
+// A structured loop has exactly one merge block, but guest loops can break to two different
+// blocks (e.g. BVH traversal leaving either to a primitive test or to the traversal epilogue).
+// Route both exits through one selector block: each exiting block records which exit it takes
+// in a goto variable immediately before branching, and the selector dispatches on it.
+bool UnifyTwoLoopExits(Graph& graph, const NaturalLoop& loop) {
+	std::vector<uint32_t>                      targets;
+	std::vector<std::pair<uint32_t, uint32_t>> exits;
+	for (const auto block_id: loop.body_blocks) {
+		const auto* block = graph.FindBlock(block_id);
+		if (block == nullptr) {
+			return false;
+		}
+		for (const auto successor: block->successors) {
+			if (!Contains(loop.body_blocks, successor)) {
+				AddUnique(targets, successor);
+				exits.emplace_back(block_id, successor);
+			}
+		}
+	}
+	if (targets.size() != 2u) {
+		return false;
+	}
+	// The recorded value must identify the exit unambiguously, and the block's terminator must be
+	// free to carry the goto assignment.
+	for (const auto& [block_id, target]: exits) {
+		const auto* block = graph.FindBlock(block_id);
+		if (block->terminator.goto_value >= 0 ||
+		    block->terminator.condition == BranchCondition::GotoVariable ||
+		    (block->terminator.kind != TerminatorKind::Branch &&
+		     block->terminator.kind != TerminatorKind::ConditionalBranch)) {
+			return false;
+		}
+		for (const auto successor: block->successors) {
+			if (successor != target && !Contains(loop.body_blocks, successor)) {
+				return false;
+			}
+		}
+	}
+
+	uint32_t variable = LoopExitGotoVariableBase;
+	for (const auto& block: graph.blocks) {
+		if (block.terminator.goto_variable != UINT32_MAX &&
+		    block.terminator.goto_variable >= LoopExitGotoVariableBase) {
+			variable = std::max(variable, block.terminator.goto_variable + 1u);
+		}
+	}
+
+	const auto  first       = std::min(targets[0], targets[1]);
+	const auto  second      = std::max(targets[0], targets[1]);
+	const auto* first_block = graph.FindBlock(first);
+	BasicBlock  selector;
+	selector.id                       = static_cast<uint32_t>(graph.blocks.size());
+	selector.start_pc                 = first_block != nullptr ? first_block->start_pc : 0u;
+	selector.end_pc                   = selector.start_pc;
+	selector.inst_begin               = first_block != nullptr ? first_block->inst_begin : 0u;
+	selector.inst_end                 = selector.inst_begin;
+	selector.successors               = {second, first};
+	selector.terminator.kind          = TerminatorKind::ConditionalBranch;
+	selector.terminator.condition     = BranchCondition::GotoVariable;
+	selector.terminator.true_block    = second;
+	selector.terminator.false_block   = first;
+	selector.terminator.goto_variable = variable;
+	const auto selector_id            = selector.id;
+	graph.blocks.push_back(std::move(selector));
+
+	for (const auto& [block_id, target]: exits) {
+		auto* block                     = graph.FindBlock(block_id);
+		block->terminator.goto_variable = variable;
+		block->terminator.goto_value    = target == second ? 1 : 0;
+		ReplaceValue(block->successors, target, selector_id);
+		ReplaceTerminatorTarget(block->terminator, target, selector_id);
+	}
+	MoveBlockBefore(graph, selector_id, first);
+	return true;
 }
 
 bool CanonicalizeNaturalLoops(Graph& graph) {
@@ -1303,6 +1383,18 @@ bool CanonicalizeNaturalLoops(Graph& graph) {
 			RecomputeAnalyses(graph);
 			changed = true;
 			break;
+		}
+		if (changed) {
+			continue;
+		}
+
+		for (const auto& loop: graph.natural_loops) {
+			if (UnifyTwoLoopExits(graph, loop)) {
+				RebuildPredecessors(graph);
+				RecomputeAnalyses(graph);
+				changed = true;
+				break;
+			}
 		}
 		if (changed) {
 			continue;
@@ -1789,7 +1881,7 @@ bool RouteOneSharedArm(Graph& graph, uint32_t original_block_count, uint32_t out
 				continue;
 			}
 
-			const auto continuation = graph.FindNearestCommonPostDominator(shared, body);
+			const auto  continuation       = graph.FindNearestCommonPostDominator(shared, body);
 			const auto* continuation_block = graph.FindBlock(continuation);
 			if (continuation_block == nullptr || continuation == other ||
 			    CanReachBefore(graph, other, continuation, UINT32_MAX)) {
@@ -1808,15 +1900,15 @@ bool RouteOneSharedArm(Graph& graph, uint32_t original_block_count, uint32_t out
 				}
 			}
 			const auto first_arm = std::min(continuation, other);
-			if (outer_predecessors.empty() || inner_predecessors.empty() ||
-			    external_predecessor || first_arm >= original_block_count ||
-			    outer_id >= inner_id || inner_id >= first_arm) {
+			if (outer_predecessors.empty() || inner_predecessors.empty() || external_predecessor ||
+			    first_arm >= original_block_count || outer_id >= inner_id ||
+			    inner_id >= first_arm) {
 				continue;
 			}
 
 			const auto route_select =
 			    AppendGotoSelectBlock(graph, route_variable, other, continuation);
-			const auto inner_merge  = AppendSyntheticBranchBlock(graph, route_select);
+			const auto inner_merge = AppendSyntheticBranchBlock(graph, route_select);
 			const auto outer_continue =
 			    AppendGotoSetBlock(graph, route_variable, false, route_select);
 			const auto inner_continue =
@@ -2201,16 +2293,16 @@ bool Structurize(Graph& graph) {
 	const auto failure_kind = structured.failure_kind;
 	// Structurization inserts and renumbers blocks. Recover source identity for a
 	// semantic block; a synthetic block has no corresponding original diagnostic ID.
-	const auto* failed = structured.FindBlock(structured.failure_block);
-	const auto original = std::ranges::find_if(graph.blocks, [&](const BasicBlock& block) {
+	const auto* failed         = structured.FindBlock(structured.failure_block);
+	const auto  original       = std::ranges::find_if(graph.blocks, [&](const BasicBlock& block) {
 		return failed != nullptr && failed->inst_begin != failed->inst_end &&
 		       block.inst_begin == failed->inst_begin && block.inst_end == failed->inst_end &&
 		       block.start_pc == failed->start_pc && block.end_pc == failed->end_pc;
 	});
-	const auto failure_block = original != graph.blocks.end() ? original->id : UINT32_MAX;
-	auto failure_reason = std::move(structured.unsupported_reason);
-	Graph routed = graph;
-	const auto route_budget = static_cast<uint32_t>(graph.blocks.size());
+	const auto  failure_block  = original != graph.blocks.end() ? original->id : UINT32_MAX;
+	auto        failure_reason = std::move(structured.unsupported_reason);
+	Graph       routed         = graph;
+	const auto  route_budget   = static_cast<uint32_t>(graph.blocks.size());
 	// Apply one route at a time and retry. Eagerly routing every matching diamond can
 	// rewrite unrelated selections that were already structurally valid.
 	for (uint32_t route_variable = 0; route_variable < route_budget; route_variable++) {

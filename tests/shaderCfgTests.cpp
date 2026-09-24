@@ -7881,7 +7881,9 @@ void TestNewShaderRecompilerCfgLoopEarlyBreakNoSelection() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
-void TestNewShaderRecompilerCfgNestedLoopNonlocalExitDispatcher() {
+// The inner loop exits both to the outer continue and past the outer loop. Routing the two exits
+// through a goto-variable selector keeps this on the structured path.
+void TestNewShaderRecompilerCfgNestedLoopNonlocalExitStructured() {
   const uint32_t shader[] = {
       EncodeSopc(0x0a, 0, 129),    // outer loop: s_cmp_lt_u32 s0, 1
       EncodeSopp(0x04, 9),         // outer exit -> end
@@ -7901,10 +7903,12 @@ void TestNewShaderRecompilerCfgNestedLoopNonlocalExitDispatcher() {
   options.dump_ir = true;
 
   auto result = RecompileForTest(shader, options);
-  Check((result.ir_dump.find("mode=dispatcher") != std::string::npos),
-        "nested-loop nonlocal exit did not select dispatcher fallback");
-  Check(SpirvInstructionOpcodeCount(result.spirv, 251) != 0,
-        "nested-loop nonlocal exit dispatcher SPIR-V lacks OpSwitch");
+  Check((result.ir_dump.find("mode=structured") != std::string::npos),
+        "nested-loop nonlocal exit did not stay on the structured path");
+  Check(SpirvInstructionOpcodeCount(result.spirv, 246) == 2,
+        "nested-loop nonlocal exit SPIR-V lacks two OpLoopMerge");
+  Check(SpirvInstructionOpcodeCount(result.spirv, 251) == 0,
+        "nested-loop nonlocal exit unexpectedly used dispatcher OpSwitch");
   CheckSpirvBinaryValidates(result.spirv);
 }
 
@@ -7976,13 +7980,25 @@ void TestNewShaderRecompilerCfgNestedLoopExitTailMergeSplit() {
         "inner loop merge still aliases the outer continue target");
   const auto *inner_merge =
       graph.FindBlock(inner_header->terminator.merge_block);
-  Check(inner_merge != nullptr &&
-            inner_merge->inst_begin == inner_merge->inst_end &&
-            inner_merge->terminator.kind ==
-                ShaderRecompiler::CFG::TerminatorKind::Branch &&
-            inner_merge->terminator.true_block ==
-                outer_header->terminator.continue_block,
-        "private inner merge does not forward to the outer continue target");
+  // The two exit tails are joined either by an empty block forwarding to the outer continue or
+  // by an empty goto-variable selector that dispatches to the tails after the inner loop.
+  const bool forwards =
+      inner_merge != nullptr &&
+      inner_merge->terminator.kind == ShaderRecompiler::CFG::TerminatorKind::Branch &&
+      inner_merge->terminator.true_block == outer_header->terminator.continue_block;
+  const bool selects_tail =
+      inner_merge != nullptr &&
+      inner_merge->terminator.kind ==
+          ShaderRecompiler::CFG::TerminatorKind::ConditionalBranch &&
+      inner_merge->terminator.condition ==
+          ShaderRecompiler::CFG::BranchCondition::GotoVariable;
+  Check(inner_merge != nullptr && inner_merge->inst_begin == inner_merge->inst_end &&
+            (forwards || selects_tail),
+        "private inner merge neither forwards to the outer continue nor selects a tail");
+
+  const auto result =
+      RecompileForTest(shader, MakeCompileOptions(ShaderType::Compute));
+  CheckSpirvBinaryValidates(result.spirv);
 }
 
 void TestNewShaderRecompilerCfgMixedContinueNonmergeExitDispatcher() {
@@ -13528,6 +13544,7 @@ int main() {
   EnsureConfigInitialized();
   TestRayTracingDispatchDetection();
   TestRayTracingEmulation();
+  TestLoopWithTwoExits();
   TestResourceDescriptorClassification();
   TestShaderBufferResourceSize();
   TestNativeShaderResourceDependencies();
@@ -13588,7 +13605,7 @@ int main() {
   TestNewShaderRecompilerCfgLoopHeaderDsRead2B64Structured();
   TestNewShaderRecompilerCfgSharedOuterAndLoopMerge();
   TestNewShaderRecompilerCfgLoopEarlyBreakNoSelection();
-  TestNewShaderRecompilerCfgNestedLoopNonlocalExitDispatcher();
+  TestNewShaderRecompilerCfgNestedLoopNonlocalExitStructured();
   TestNewShaderRecompilerCfgNestedLoopLocalExitNoSelection();
   TestNewShaderRecompilerCfgNestedLoopExitTailMergeSplit();
   TestNewShaderRecompilerCfgMixedContinueNonmergeExitDispatcher();

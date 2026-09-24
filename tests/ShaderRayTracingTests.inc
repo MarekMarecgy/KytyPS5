@@ -86,6 +86,55 @@ void TestRayTracingDispatchDetection() {
   }
 }
 
+// BVH traversal loops break to two different blocks (primitive test / epilogue). SPIR-V loops
+// have one merge, so the structurizer must route both exits through a goto-variable selector.
+void TestLoopWithTwoExits() {
+  const std::array<uint32_t, 8> shader{
+      EncodeSopp(0x04, 3),      // 0: s_cbranch_scc0 A    (loop header, first exit)
+      EncodeSopp(0x05, 4),      // 1: s_cbranch_scc1 B    (second exit)
+      EncodeVop1(0x01, 1, 0),   // 2: v_mov_b32 v1, s0
+      EncodeSopp(0x02, 0xfffc), // 3: s_branch 0         (back edge)
+      EncodeVop1(0x01, 2, 0),   // 4: A: v_mov_b32 v2, s0
+      EncodeSopp(0x02, 1),      // 5: s_branch END
+      EncodeVop1(0x01, 3, 0),   // 6: B: v_mov_b32 v3, s0
+      EncodeSopp(0x01),         // 7: END: s_endpgm
+  };
+  ShaderRecompiler::Decoder::Program decoded;
+  ShaderRecompiler::Decoder::DecodeProgram(shader, decoded, false);
+  auto graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  Check(ShaderRecompiler::CFG::Structurize(graph),
+        "loop with two exits fell back to the dispatcher");
+  Check(std::ranges::any_of(graph.blocks,
+                            [](const auto &block) {
+                              return block.terminator.condition ==
+                                         ShaderRecompiler::CFG::BranchCondition::GotoVariable &&
+                                     block.terminator.goto_variable >= 0x40000000u;
+                            }),
+        "loop exits were not routed through a goto-variable selector");
+  for (const auto &block : graph.blocks) {
+    if (block.terminator.loop_header) {
+      const auto merge = block.terminator.merge_block;
+      for (const auto &member : graph.blocks) {
+        if (member.terminator.kind == ShaderRecompiler::CFG::TerminatorKind::ConditionalBranch &&
+            member.terminator.merge_block == UINT32_MAX && !member.terminator.loop_header &&
+            member.id != block.id) {
+          const bool breaks = member.terminator.true_block == merge ||
+                              member.terminator.false_block == merge ||
+                              member.terminator.true_block == block.terminator.continue_block ||
+                              member.terminator.false_block == block.terminator.continue_block;
+          const auto *inner = graph.FindBlock(member.id);
+          Check(inner == nullptr || breaks || !graph.Dominates(block.id, member.id) ||
+                    graph.Dominates(merge, member.id),
+                "loop body conditional without merge does not break or continue");
+        }
+      }
+    }
+  }
+  const auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Compute));
+  Check(!result.spirv.empty(), "loop with two exits did not compile");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestRayTracingEmulation() {
   constexpr uint32_t R128 = 1u << 15u;
   constexpr uint32_t Dim1D = 0u;

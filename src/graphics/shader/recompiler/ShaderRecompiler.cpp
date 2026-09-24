@@ -74,6 +74,11 @@ void LogDispatcherFallback(const CompileOptions& options, const CFG::Graph& cfg,
 	     static_cast<uint64_t>(predecessors), static_cast<uint64_t>(successors),
 	     static_cast<uint64_t>(cfg.blocks.size()), static_cast<uint64_t>(cfg.natural_loops.size()),
 	     static_cast<uint64_t>(cfg.back_edges.size()), cfg.unsupported_reason.c_str());
+	// The dispatcher is valid but slow to compile and run; surface it even with shader logs off.
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "Shader 0x{:016x}: unstructured control flow ({}, {}), using dispatcher fallback: {}\n",
+	    options.shader_hash, phase, CFG::FailureKindToString(cfg.failure_kind),
+	    cfg.unsupported_reason));
 }
 
 enum class EmbeddedFetchValueType { Unknown, Constant, AttribTable, Attrib, BufferTable, Buffer };
