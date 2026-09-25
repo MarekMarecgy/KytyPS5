@@ -22,13 +22,18 @@ public:
 	~CommandScheduler();
 	KYTY_CLASS_NO_COPY(CommandScheduler);
 
-	void           Begin(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders);
-	void           BeginRendering(const RenderState& state);
-	void           EndRendering();
-	void           Flush();
-	void           Flush(SubmitInfo& submit);
-	void           FlushAndWait();
-	void           Finish();
+	void Begin(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders);
+	void BeginRendering(const RenderState& state);
+	void EndRendering();
+	void Flush();
+	void Flush(SubmitInfo& submit);
+	void FlushAndWait();
+	void Finish();
+	// Called after every DrawIndex/DrawAuto. Long chains of draws with no intervening
+	// RELEASE_MEM/wait can otherwise sit recorded but unsubmitted, leaving the GPU idle until
+	// something else forces a flush. Every KYTY_DRAW_FLUSH_INTERVAL draws (default 256, 0
+	// disables) this submits without waiting, like Flush().
+	void           CompleteDraw();
 	CommandBuffer& BeginCommand();
 	uint64_t       Submit(SubmitInfo submit = {});
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
@@ -42,11 +47,11 @@ public:
 	void                      DeferPriorityOperation(Common::UniqueFunction<void>&& operation);
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 
-	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
-	void                           CheckActive() const;
-	CommandBuffer&                 Current();
-	[[nodiscard]] uint64_t         CurrentTick() const noexcept { return m_master.CurrentTick(); }
-	[[nodiscard]] bool             IsFree(uint64_t tick);
+	[[nodiscard]] bool     Active() const noexcept { return m_command.m_registers != nullptr; }
+	void                   CheckActive() const;
+	CommandBuffer&         Current();
+	[[nodiscard]] uint64_t CurrentTick() const noexcept { return m_master.CurrentTick(); }
+	[[nodiscard]] bool     IsFree(uint64_t tick);
 	[[nodiscard]] MasterSemaphore& GetMasterSemaphore() noexcept { return m_master; }
 	[[nodiscard]] RenderContext&   Context() const noexcept { return m_context; }
 	[[nodiscard]] GraphicContext&  Graphics() const noexcept { return m_graphics; }
@@ -89,6 +94,7 @@ private:
 	GraphicContext&              m_graphics;
 	CommandPool                  m_command_pool;
 	CommandBuffer                m_command;
+	uint32_t                     m_recorded_draws = 0;
 	std::queue<PendingOperation> m_pending_operations;
 	std::queue<PendingOperation> m_priority_operations;
 	std::mutex                   m_operation_mutex;

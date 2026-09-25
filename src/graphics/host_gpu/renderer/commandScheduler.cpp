@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 namespace Libs::Graphics {
@@ -26,6 +27,15 @@ void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint3
 	            what, vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op,
 	            debug_submit, arg0, arg1, arg2, arg3, arg4);
 	std::fflush(stdout);
+}
+
+// KYTY_DRAW_FLUSH_INTERVAL=N overrides CompleteDraw()'s periodic flush interval; 0 disables it.
+uint32_t DrawFlushInterval() {
+	static const uint32_t interval = [] {
+		const char* value = std::getenv("KYTY_DRAW_FLUSH_INTERVAL");
+		return value == nullptr ? 256u : static_cast<uint32_t>(std::strtoul(value, nullptr, 10));
+	}();
+	return interval;
 }
 
 } // namespace
@@ -168,6 +178,15 @@ void CommandScheduler::EndRendering() {
 void CommandScheduler::Flush() {
 	SubmitInfo submit;
 	Flush(submit);
+}
+
+void CommandScheduler::CompleteDraw() {
+	const auto interval = DrawFlushInterval();
+	if (interval == 0u || ++m_recorded_draws < interval) {
+		return;
+	}
+	CheckActive();
+	Flush();
 }
 
 void CommandScheduler::Flush(SubmitInfo& submit) {
@@ -388,6 +407,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	m_command.m_buffer = nullptr;
+	m_recorded_draws   = 0;
 	return tick;
 }
 
