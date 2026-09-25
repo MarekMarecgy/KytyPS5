@@ -138,18 +138,28 @@ public:
 	}
 	[[nodiscard]] uint64_t HashGuestEdges() const;
 
-	ImageInfo        info;
-	VulkanImage      backing;
+	ImageInfo                    info;
+	VulkanImage                  backing;
 	std::vector<CachedImageView> views;
-	ImageUsage       usage;
-	ImageBinding     binding;
-	bool             registered     = false;
-	mutable uint32_t query_epoch    = 0;
-	uint64_t         track_addr     = 0;
-	uint64_t         track_addr_end = 0;
-	ImageId          depth_id {};
-	uint64_t         tick_accessed_last = 0;
-	size_t           lru_id             = 0;
+	ImageUsage                   usage;
+	ImageBinding                 binding;
+	bool                         registered     = false;
+	mutable uint32_t             query_epoch    = 0;
+	uint64_t                     track_addr     = 0;
+	uint64_t                     track_addr_end = 0;
+	ImageId                      depth_id {};
+	uint64_t                     tick_accessed_last = 0;
+	size_t                       lru_id             = 0;
+	// Last DCC fast-clear resolution by MaterializeDccClear: the open recording's tick and the
+	// metadata/image layers it covered. Repeating it in the same recording skips the synchronous
+	// metadata readback.
+	struct DccClearCheck {
+		uint64_t tick                                   = UINT64_MAX;
+		uint32_t first                                  = 0;
+		uint32_t count                                  = 0;
+		uint32_t image_first                            = 0;
+		bool     operator==(const DccClearCheck&) const = default;
+	} dcc_clear_checked {};
 
 private:
 	friend struct ImageTestAccess;
