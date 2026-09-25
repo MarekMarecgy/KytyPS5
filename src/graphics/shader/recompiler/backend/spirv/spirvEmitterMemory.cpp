@@ -1087,13 +1087,32 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto count = Binary(state, spv::OpIAdd, TypeU32(state),
 	                          Unary(state, spv::OpBitCount, TypeU32(state), low),
 	                          Unary(state, spv::OpBitCount, TypeU32(state), high));
-	const auto first = ctx.FirstLane(ballot);
+	auto       first = ctx.FirstLane(ballot);
+	// Pixel waves also run helper invocations, whose atomics Vulkan discards. Update the counter
+	// from the lowest live pixel instead (guest exec excludes helpers without S_WQM).
+	uint32_t live = 0;
+	if (state.helper_invocation_variable != 0 && state.lane_count == 1) {
+		const auto helper = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, TypeBool(state), helper,
+		                          state.helper_invocation_variable);
+		live                   = Binary(state, spv::OpLogicalAnd, TypeBool(state), exec,
+		                                Unary(state, spv::OpLogicalNot, TypeBool(state), helper));
+		const auto live_ballot = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4),
+		                          live_ballot, ConstantU32(state, spv::ScopeSubgroup), live);
+		first = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), first,
+		                          ConstantU32(state, spv::ScopeSubgroup), live_ballot);
+	}
 	const auto source_lane =
 	    state.lane_count == 2
 	        ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), first, ConstantU32(state, 31))
 	        : first;
-	const auto is_first       = Binary(state, spv::OpIEqual, TypeBool(state),
-	                                   EmitSubgroupLocalInvocationId(state), source_lane);
+	auto is_first = Binary(state, spv::OpIEqual, TypeBool(state),
+	                       EmitSubgroupLocalInvocationId(state), source_lane);
+	if (live != 0) {
+		is_first = Binary(state, spv::OpLogicalAnd, TypeBool(state), is_first, live);
+	}
 	const auto storage_bounds = EmitMemoryElementInBounds(state, access, index);
 	const auto m0_bounds =
 	    mem.kind == IR::ResourceKind::Gds
