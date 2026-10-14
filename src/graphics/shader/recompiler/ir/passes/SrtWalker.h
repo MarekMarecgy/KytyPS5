@@ -26,6 +26,10 @@ bool ValidateRuntimeValue(const ResourcePlan& program, Value value,
                           RuntimeValueType type = RuntimeValueType::Any);
 // Uses the strict reader for values that affect shader specialization.
 SrtRuntime CleanRuntime(SrtRuntime runtime);
+// Direct guest read used when the runtime supplies no ordinary reader. Blocks behind an
+// unresolved branch are walked speculatively, so a guarded null table pointer can reach
+// it; null-page reads yield zeros, since a path the GPU executes never reads there.
+bool ReadGuestWords(uint64_t address, std::span<uint32_t> values);
 
 // One memoized evaluation session shared by the entire shader resource refresh.
 class SrtWalker {

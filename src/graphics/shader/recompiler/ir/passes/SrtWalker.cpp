@@ -18,6 +18,16 @@ SrtRuntime CleanRuntime(SrtRuntime runtime) {
 	return runtime;
 }
 
+bool ReadGuestWords(uint64_t address, std::span<uint32_t> values) {
+	constexpr uint64_t NullPageSize = 0x10000u;
+	if (address < NullPageSize) {
+		std::ranges::fill(values, 0u);
+		return true;
+	}
+	std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+	return true;
+}
+
 namespace {
 
 constexpr uint64_t AddressMask = 0x0000ffffffffffffull;
@@ -526,7 +536,7 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		}
 	} else {
 		if (vector) return false;
-		std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
+		ReadGuestWords(address, {&word, 1});
 	}
 	result = word;
 	return true;
