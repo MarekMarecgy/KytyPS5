@@ -275,6 +275,9 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 					requirements.subgroup_ballot              = true;
 					requirements.subgroup_shuffle             = true;
 					requirements.subgroup_local_invocation_id = true;
+					// The counter update must come from a live pixel: helper invocations'
+					// atomics are discarded.
+					requirements.helper_invocation |= program.stage == ShaderType::Pixel;
 				}
 			}
 			switch (inst.GetOpcode()) {

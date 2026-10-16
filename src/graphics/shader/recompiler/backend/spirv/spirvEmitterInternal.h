@@ -69,6 +69,7 @@ struct SpirvRequirements {
 	bool function_lds                 = false;
 	bool function_scratch             = false;
 	bool pixel_valid_mask             = false;
+	bool helper_invocation            = false;
 	bool buffer_int64_atomics         = false;
 	bool buffer_u8                    = false;
 	bool buffer_u16                   = false;
@@ -148,6 +149,7 @@ struct EmitterState {
 	const IR::Block*           current_block                         = nullptr;
 	uint32_t                   pixel_valid_mask_variable             = 0;
 	uint32_t                   subgroup_local_invocation_id_variable = 0;
+	uint32_t                   helper_invocation_variable            = 0;
 	uint32_t                   per_vertex_variable                   = 0;
 	uint32_t                   point_size_variable                   = 0;
 	uint32_t                   clip_distance_variable                = 0;
