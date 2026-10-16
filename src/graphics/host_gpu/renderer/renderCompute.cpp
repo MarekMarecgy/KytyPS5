@@ -9,6 +9,7 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/renderer/gpuDiagnostics.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
@@ -430,7 +431,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	const auto diag_tick = m_context.GetCommandScheduler().CurrentTick();
+	GpuCheckpoint(m_context.GetGraphics(), vk_buffer, GpuCheckpointKind::DispatchBegin, diag_tick,
+	              program.shader_hash, 0, cs_regs.cs_regs.data_addr, thread_group_x,
+	              thread_group_y, thread_group_z);
 	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	GpuCheckpoint(m_context.GetGraphics(), vk_buffer, GpuCheckpointKind::DispatchEnd, diag_tick,
+	              program.shader_hash, 0, cs_regs.cs_regs.data_addr, thread_group_x,
+	              thread_group_y, thread_group_z);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -491,7 +499,12 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	const auto diag_tick = m_context.GetCommandScheduler().CurrentTick();
+	GpuCheckpoint(m_context.GetGraphics(), vk_buffer, GpuCheckpointKind::DispatchIndirectBegin,
+	              diag_tick, program.shader_hash, args_addr, cs_regs.cs_regs.data_addr);
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	GpuCheckpoint(m_context.GetGraphics(), vk_buffer, GpuCheckpointKind::DispatchIndirectEnd,
+	              diag_tick, program.shader_hash, args_addr, cs_regs.cs_regs.data_addr);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 }

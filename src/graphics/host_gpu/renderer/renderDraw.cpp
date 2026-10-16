@@ -26,6 +26,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
+#include "graphics/host_gpu/renderer/gpuDiagnostics.h"
 #include "kernel/eventQueue.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
@@ -1149,11 +1150,18 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
+	const auto diag_tick = m_context.GetCommandScheduler().CurrentTick();
+	const auto diag_vs   = state.vertex_info[0].stage.program->shader_hash;
+	const auto diag_ps   = state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0u;
+	GpuCheckpoint(m_context.GetGraphics(), vk_buffer, GpuCheckpointKind::DrawBegin, diag_tick,
+	              diag_vs, diag_ps, submit_id, draw.index_count, draw.instance_count);
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
+	GpuCheckpoint(m_context.GetGraphics(), vk_buffer, GpuCheckpointKind::DrawEnd, diag_tick,
+	              diag_vs, diag_ps, submit_id, draw.index_count, draw.instance_count);
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u);
